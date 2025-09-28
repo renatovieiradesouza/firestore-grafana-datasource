@@ -25,7 +25,30 @@ It uses [FireQL](https://github.com/pgollangi/FireQL) to capture user query that
 - [x] Limit query results
 - [x] Query [Collection Groups](https://firebase.blog/posts/2019/06/understanding-collection-group-queries)
 - [ ] Count query results
-- [ ] Use of [Grafafa global variables](https://grafana.com/docs/grafana/latest/dashboards/variables/add-template-variables/#global-variables) in queries.
+- [x] Use of [Grafafa global variables](https://grafana.com/docs/grafana/latest/dashboards/variables/add-template-variables/#global-variables) in queries.
+
+### Grafana macros support
+
+The datasource expands a minimal set of Grafana macros before executing FireQL:
+
+- `__$timeFrom()` → quoted RFC3339 timestamp for panel range start
+- `__$timeTo()` → quoted RFC3339 timestamp for panel range end
+- `__$interval_ms` → panel interval in milliseconds (integer)
+- `__$timeFilter(field)` → expands to `field >= 'from' and field <= 'to'`
+
+Examples:
+
+```
+select * from users where $__timeFilter(created_at)
+```
+
+```
+select * from events where ts between $__timeFrom() and $__timeTo()
+```
+
+Notes:
+- The `field` passed to `__$timeFilter(field)` must be a Firestore timestamp field compatible with FireQL comparisons.
+- Timestamps are expanded in UTC as RFC3339 strings.
 
 ### Firestore data source configuration
 

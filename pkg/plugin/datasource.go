@@ -17,6 +17,9 @@ import (
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	"regexp"
+	"strconv"
+	"strings"
 )
 
 // Make sure Datasource implements required interfaces. This is important to do
@@ -123,10 +126,13 @@ func (d *Datasource) queryInternal(ctx context.Context, pCtx backend.PluginConte
 
 	log.DefaultLogger.Info("Created fireql.NewFireQLWithServiceAccountJSON")
 
-	if len(qm.Query) > 0 {
+    if len(qm.Query) > 0 {
 
-		log.DefaultLogger.Info("Executing query", qm.Query)
-		result, err := fQuery.Execute(qm.Query)
+		// Expand common Grafana macros before executing FireQL
+		expandedQuery := expandGrafanaMacros(qm.Query, query.TimeRange, query.Interval, query.MaxDataPoints)
+
+		log.DefaultLogger.Info("Executing query", expandedQuery)
+		result, err := fQuery.Execute(expandedQuery)
 		if err != nil {
 			return backend.ErrDataResponse(backend.StatusBadRequest, "fireql.Execute: "+err.Error())
 		}
@@ -211,6 +217,63 @@ func (d *Datasource) queryInternal(ctx context.Context, pCtx backend.PluginConte
 	}
 
 	return response
+}
+
+// expandGrafanaMacros replaces a minimal set of Grafana macros commonly used in SQL datasources
+// with FireQL-compatible expressions.
+// Supported:
+//  - $__timeFrom(), $__timeTo(): RFC3339 timestamps as quoted strings
+//  - $__interval_ms: integer milliseconds based on panel interval
+//  - $__timeFilter(field): expands to "field >= 'from' and field <= 'to'"
+// Note: Users should pass the timestamp field name into $__timeFilter(field).
+func expandGrafanaMacros(original string, tr backend.TimeRange, interval time.Duration, _ int64) string {
+    q := original
+
+    // Helper to format time in RFC3339 which FireQL treats as time.Time when comparing to Firestore timestamp fields
+    formatTime := func(t time.Time) string {
+        return t.UTC().Format(time.RFC3339)
+    }
+
+    // $__timeFrom(), $__timeTo()
+    q = strings.ReplaceAll(q, "$__timeFrom()", "'"+formatTime(tr.From)+"'")
+    q = strings.ReplaceAll(q, "$__timeTo()", "'"+formatTime(tr.To)+"'")
+
+    // Unix epoch helpers (seconds and ms)
+    q = strings.ReplaceAll(q, "$__unixEpochFrom()", strconv.FormatInt(tr.From.Unix(), 10))
+    q = strings.ReplaceAll(q, "$__unixEpochTo()", strconv.FormatInt(tr.To.Unix(), 10))
+    q = strings.ReplaceAll(q, "$__unixEpochFromMs()", strconv.FormatInt(tr.From.UnixMilli(), 10))
+    q = strings.ReplaceAll(q, "$__unixEpochToMs()", strconv.FormatInt(tr.To.UnixMilli(), 10))
+
+    // $__interval_ms
+    intervalMs := strconv.FormatInt(interval.Milliseconds(), 10)
+    q = strings.ReplaceAll(q, "$__interval_ms", intervalMs)
+
+    // $__timeFilter(field) and $timeFilter(field) alias
+    // If you need epoch-ms numeric comparisons, use $__timeFilterMs(field)
+    re := regexp.MustCompile(`\$(?:__)?timeFilter\(\s*([^\)\s]+)\s*\)`) // captures field identifier
+    q = re.ReplaceAllStringFunc(q, func(m string) string {
+        sub := re.FindStringSubmatch(m)
+        if len(sub) != 2 {
+            return m
+        }
+        field := sub[1]
+        return field + " >= '" + formatTime(tr.From) + "' and " + field + " <= '" + formatTime(tr.To) + "'"
+    })
+
+    // $__timeFilterMs(field) and $timeFilterMs(field) → numeric epoch millis comparisons
+    reMs := regexp.MustCompile(`\$(?:__)?timeFilterMs\(\s*([^\)\s]+)\s*\)`) // captures field identifier
+    fromMs := strconv.FormatInt(tr.From.UnixMilli(), 10)
+    toMs := strconv.FormatInt(tr.To.UnixMilli(), 10)
+    q = reMs.ReplaceAllStringFunc(q, func(m string) string {
+        sub := reMs.FindStringSubmatch(m)
+        if len(sub) != 2 {
+            return m
+        }
+        field := sub[1]
+        return field + " >= " + fromMs + " and " + field + " <= " + toMs
+    })
+
+    return q
 }
 
 func newFirestoreClient(ctx context.Context, pCtx backend.PluginContext) (*firestore.Client, error) {
